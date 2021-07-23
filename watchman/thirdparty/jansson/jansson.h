@@ -16,8 +16,8 @@
 #include <string>
 #include <atomic>
 #include <vector>
-#include "jansson_config.h"
-#include "utf.h"
+#include "jansson_config.h" // @manual=//watchman/thirdparty/jansson:config_h
+#include "watchman/thirdparty/jansson/utf.h"
 
 /* version */
 
@@ -106,7 +106,7 @@ class json_ref {
     return ref_;
   }
 
-  /* implicit */ operator bool() const {
+  explicit operator bool() const {
     return ref_ != nullptr;
   }
 

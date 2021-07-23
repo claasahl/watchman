@@ -5,11 +5,13 @@
 #include <atomic>
 #include <condition_variable>
 #include <unordered_map>
-#include "CookieSync.h"
-#include "PubSub.h"
-#include "QueryableView.h"
+#include "watchman/CookieSync.h"
 #include "watchman/FileSystem.h"
-#include "watchman_config.h"
+#include "watchman/PendingCollection.h"
+#include "watchman/PubSub.h"
+#include "watchman/QueryableView.h"
+#include "watchman/WatchmanConfig.h"
+#include "watchman/watchman_ignore.h"
 
 #define HINT_NUM_DIRS 128 * 1024
 #define CFG_HINT_NUM_DIRS "hint_num_dirs"
@@ -23,6 +25,8 @@ constexpr std::chrono::milliseconds DEFAULT_QUERY_SYNC_MS(60000);
 
 /* Idle out watches that haven't had activity in several days */
 #define DEFAULT_REAP_AGE (86400 * 5)
+
+struct watchman_trigger_command;
 
 namespace watchman {
 class ClientStateAssertion;
@@ -81,7 +85,7 @@ struct watchman_root : public std::enable_shared_from_this<watchman_root> {
 
   /* config options loaded via json file */
   json_ref config_file;
-  Configuration config;
+  watchman::Configuration config;
 
   const int trigger_settle{0};
   /**
@@ -233,7 +237,3 @@ void handle_open_errno(
     std::chrono::system_clock::time_point now,
     const char* syscall,
     const std::error_code& err);
-
-inline bool is_edenfs_fs_type(w_string_piece fs_type) {
-  return fs_type == "edenfs" || fs_type.startsWith("edenfs:");
-}

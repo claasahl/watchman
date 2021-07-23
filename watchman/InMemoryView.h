@@ -2,27 +2,28 @@
  * Licensed under the Apache License, Version 2.0 */
 #pragma once
 #include <folly/Synchronized.h>
-#include <folly/experimental/LockFreeRingBuffer.h>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
-#include "ContentHash.h"
-#include "CookieSync.h"
-#include "PendingCollection.h"
-#include "QueryableView.h"
-#include "SymlinkTargets.h"
+#include "watchman/ContentHash.h"
+#include "watchman/CookieSync.h"
+#include "watchman/PendingCollection.h"
+#include "watchman/QueryableView.h"
+#include "watchman/RingBuffer.h"
+#include "watchman/SymlinkTargets.h"
+#include "watchman/WatchmanConfig.h"
+#include "watchman/watchman_opendir.h"
 #include "watchman/watchman_perf.h"
+#include "watchman/watchman_query.h"
 #include "watchman/watchman_string.h"
 #include "watchman/watchman_system.h"
-#include "watchman_config.h"
-#include "watchman_opendir.h"
-#include "watchman_query.h"
 
-class Watcher;
 struct watchman_client;
 
 namespace watchman {
+
+class Watcher;
 
 // Helper struct to hold caches used by the InMemoryView
 struct InMemoryViewCaches {
@@ -36,7 +37,7 @@ struct InMemoryViewCaches {
       std::chrono::milliseconds errorTTL);
 };
 
-class InMemoryFileResult : public FileResult {
+class InMemoryFileResult final : public FileResult {
  public:
   InMemoryFileResult(const watchman_file* file, InMemoryViewCaches& caches);
   folly::Optional<FileInformation> stat() override;
@@ -134,7 +135,7 @@ class ViewDatabase {
  * Keeps track of the state of the filesystem in-memory and drives a notify
  * thread which consumes events from the watcher.
  */
-class InMemoryView : public QueryableView {
+class InMemoryView final : public QueryableView {
  public:
   InMemoryView(watchman_root* root, std::shared_ptr<Watcher> watcher);
   ~InMemoryView() override;
@@ -182,7 +183,9 @@ class InMemoryView : public QueryableView {
   const w_string& getName() const override;
   const std::shared_ptr<Watcher>& getWatcher() const;
   json_ref getWatcherDebugInfo() const override;
+  void clearWatcherDebugInfo() override;
   json_ref getViewDebugInfo() const;
+  void clearViewDebugInfo();
 
   // If content cache warming is configured, do the warm up now
   void warmContentCache();
@@ -248,7 +251,7 @@ class InMemoryView : public QueryableView {
    * Allowed flags:
    *  - W_PENDING_RECURSIVE: the directory will be recursively crawled,
    *  - W_PENDING_VIA_NOTIFY when the watcher only supports directory
-   *    notification (WATCHER_ONLY_DIRECTORY_NOTIFICATIONS), this will stat all
+   *    notification (W_PENDING_NONRECURSIVE_SCAN), this will stat all
    *    the files and directories contained in the passed in directory and stop.
    */
   void crawler(
@@ -369,8 +372,7 @@ class InMemoryView : public QueryableView {
   static_assert(88 == sizeof(PendingChangeLogEntry));
 
   // If set, paths processed by processPending are logged here.
-  std::unique_ptr<folly::LockFreeRingBuffer<PendingChangeLogEntry>>
-      processedPaths_;
+  std::unique_ptr<RingBuffer<PendingChangeLogEntry>> processedPaths_;
 };
 
 } // namespace watchman

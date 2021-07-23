@@ -2,9 +2,9 @@
  * Licensed under the Apache License, Version 2.0. */
 
 #include "watchman/saved_state/LocalSavedStateInterface.h"
-#include <folly/logging/xlog.h>
 #include <folly/portability/GTest.h>
 #include <folly/test/TestUtils.h>
+#include "watchman/Errors.h"
 #include "watchman/thirdparty/jansson/jansson.h"
 #include "watchman/watchman.h"
 

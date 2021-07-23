@@ -1,9 +1,10 @@
 /* Copyright 2012-present Facebook, Inc.
  * Licensed under the Apache License, Version 2.0 */
 
+#include "watchman/Errors.h"
 #include "watchman/InMemoryView.h"
+#include "watchman/watcher/Watcher.h"
 #include "watchman/watchman.h"
-#include "watchman/watchman_error_category.h"
 #include "watchman/watchman_system.h"
 
 static void
@@ -23,7 +24,6 @@ void InMemoryView::crawler(
     PendingChanges& coll,
     const PendingChange& pending) {
   bool recursive = pending.flags & W_PENDING_RECURSIVE;
-  bool is_desynced = pending.flags & W_PENDING_IS_DESYNCED;
 
   bool stat_all;
   if (watcher_->flags & WATCHER_HAS_PER_FILE_NOTIFICATIONS) {
@@ -35,8 +35,7 @@ void InMemoryView::crawler(
     // need to look at the files again when we crawl. To avoid recursing into
     // all the subdirectories, only stat all the files/directories when this
     // directory was added by the watcher.
-    stat_all = (pending.flags & W_PENDING_VIA_NOTIFY) &&
-        watcher_->flags & WATCHER_ONLY_DIRECTORY_NOTIFICATIONS;
+    stat_all = pending.flags & W_PENDING_NONRECURSIVE_SCAN;
   }
 
   auto dir = view.resolveDir(pending.path, true);
@@ -80,7 +79,8 @@ void InMemoryView::crawler(
   memcpy(path, pending.path.data(), pending.path.size());
   path[pending.path.size()] = 0;
 
-  logf(DBG, "opendir({}) recursive={}\n", path, recursive);
+  logf(
+      DBG, "opendir({}) recursive={} stat_all={}\n", path, recursive, stat_all);
 
   /* Start watching and open the dir for crawling.
    * Whether we open the dir prior to watching or after is watcher specific,
@@ -90,6 +90,7 @@ void InMemoryView::crawler(
   try {
     osdir = watcher_->startWatchDir(root, dir, path);
   } catch (const std::system_error& err) {
+    logf(DBG, "startWatchDir({}) threw {}\n", path, err.what());
     handle_open_errno(*root, dir, pending.now, "opendir", err.code());
     view.markDirDeleted(*watcher_, dir, getClock(pending.now), true);
     return;
@@ -140,16 +141,21 @@ void InMemoryView::crawler(
       }
       if (!file || !file->exists || stat_all || recursive) {
         auto full_path = dir->getFullPathToChild(name);
-        logf(DBG, "in crawler calling process_path on {}\n", full_path);
 
         int newFlags = 0;
         if (recursive || !file || !file->exists) {
           newFlags |= W_PENDING_RECURSIVE;
         }
-
-        if (is_desynced) {
+        if (pending.flags & W_PENDING_IS_DESYNCED) {
           newFlags |= W_PENDING_IS_DESYNCED;
         }
+
+        logf(
+            DBG,
+            "in crawler calling processPath on {} oldflags={} newflags={}\n",
+            full_path,
+            pending.flags,
+            newFlags);
 
         processPath(
             root,

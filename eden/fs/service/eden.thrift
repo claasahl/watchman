@@ -126,6 +126,13 @@ struct DaemonInfo {
 }
 
 /**
+* Information about the privhelper process
+*/
+struct PrivHelperInfo {
+  1: bool connected;
+}
+
+/**
  * The current running state of an EdenMount.
  */
 enum MountState {
@@ -645,6 +652,12 @@ struct FuseCall {
   9: optional string processName;
 }
 
+struct NfsCall {
+  1: i32 xid;
+  2: i32 procNumber;
+  3: string procName;
+}
+
 struct GetConfigParams {
   // Whether to reload the config from disk to make sure it is up-to-date
   1: eden_config.ConfigReloadBehavior reload = eden_config.ConfigReloadBehavior.AutoReload;
@@ -731,6 +744,8 @@ struct AccessCounts {
   3: i64 fsChannelWrites;
   4: i64 fsChannelBackingStoreImports;
   5: i64 fsChannelDurationNs;
+  6: i64 fsChannelMemoryCacheImports;
+  7: i64 fsChannelDiskCacheImports;
 }
 
 struct MountAccesses {
@@ -830,6 +845,27 @@ struct GetScmStatusParams {
    * directory) will never be reported even when listIgnored is true.
    */
   3: bool listIgnored = false;
+}
+
+ /**
+  * BackingStore object type. Caller will response to verify the type of the content
+  * matching the parameters passed. Exception will be thrown if type mismatch.
+  */
+enum RootType {
+  TREE = 0,
+  BLOB = 1,
+}
+
+struct SetPathRootIdParams {
+  1: PathString mountPoint,
+  2: PathString path,
+  3: BinaryHash rootId,
+  4: RootType type;
+  5: CheckoutMode mode;
+}
+
+struct SetPathRootIdResult {
+  1: list<CheckoutConflict> conflicts
 }
 
 service EdenService extends fb303_core.BaseService {
@@ -1056,6 +1092,11 @@ service EdenService extends fb303_core.BaseService {
   DaemonInfo getDaemonInfo() throws (1: EdenError ex);
 
   /**
+  * Returns information about the privhelper process, including accesibility.
+  */
+  PrivHelperInfo checkPrivHelper() throws (1: EdenError ex);
+
+  /**
    * DEPRECATED
    *
    * Returns the pid of the running edenfs daemon. New code should call
@@ -1160,6 +1201,13 @@ service EdenService extends fb303_core.BaseService {
    * fuse_in_header.
    */
   list<FuseCall> debugOutstandingFuseCalls(1: PathString mountPoint);
+
+  /**
+   * Get the list of outstanding NFS requests
+   *
+   * This will return the list of NfsCall structure containing the data from the RPC request.
+   */
+  list<NfsCall> debugOutstandingNfsCalls(1: PathString mountPoint);
 
   /**
    * Get the InodePathDebugInfo for the inode that corresponds to the given
@@ -1297,4 +1345,15 @@ service EdenService extends fb303_core.BaseService {
    * Returns the number of pending calls that were unblocked
    */
   i64 unblockFault(1: UnblockFaultArg info) throws (1: EdenError ex);
+
+  /**
+   * Directly load a BackingStore object identified by rootId at the given path.
+   *
+   * If any file or directory name conflict, the behavior is same with Checkout
+   * This method is thread safe.
+   */
+  SetPathRootIdResult setPathRootId(
+    1: SetPathRootIdParams params,
+  ) throws (1: EdenError ex);
+
 }

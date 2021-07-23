@@ -7,6 +7,7 @@
 #include "fsevents.h"
 #include "kqueue.h"
 #include "watchman/InMemoryView.h"
+#include "watchman/watcher/WatcherRegistry.h"
 #include "watchman/watchman.h"
 
 #if HAVE_FSEVENTS && defined(HAVE_KQUEUE)
@@ -40,13 +41,13 @@ class PendingEventsCond {
    * Wait for a change from a nested watcher. Return true if some events are
    * pending.
    */
-  bool wait(int timeoutms) {
+  bool waitAndClear(int timeoutms) {
     auto lock = stop_.lock();
-    if (lock->shouldStop) {
-      return false;
-    }
-    cond_.wait_for(lock.as_lock(), std::chrono::milliseconds(timeoutms));
-    return lock->hasPending;
+    cond_.wait_until(
+        lock.as_lock(),
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutms),
+        [&] { return lock->hasPending || lock->shouldStop; });
+    return std::exchange(lock->hasPending, false);
   }
 
   /**
@@ -114,9 +115,7 @@ class KQueueAndFSEventsWatcher : public Watcher {
 };
 
 KQueueAndFSEventsWatcher::KQueueAndFSEventsWatcher(watchman_root* root)
-    : Watcher(
-          "kqueue+fsevents",
-          WATCHER_ONLY_DIRECTORY_NOTIFICATIONS | WATCHER_HAS_SPLIT_WATCH),
+    : Watcher("kqueue+fsevents", WATCHER_HAS_SPLIT_WATCH),
       kqueueWatcher_(std::make_shared<KQueueWatcher>(root, false)),
       pendingCondition_(std::make_shared<PendingEventsCond>()) {}
 
@@ -168,8 +167,9 @@ folly::SemiFuture<folly::Unit> KQueueAndFSEventsWatcher::flushPendingEvents() {
   futures.reserve(fseventsWatchers.size());
   for (auto& [name, watcher] : fseventsWatchers) {
     auto future = watcher->flushPendingEvents();
-    w_check(future.valid(), "FSEvents did not return valid flush future");
-    futures.push_back(std::move(future));
+    if (future.valid()) {
+      futures.push_back(std::move(future));
+    }
   }
   return folly::collect(futures).unit();
 }
@@ -193,7 +193,8 @@ std::unique_ptr<watchman_dir_handle> KQueueAndFSEventsWatcher::startWatchDir(
       root->cookies.addCookieDir(fullPath);
       auto [it, _] = wlock->emplace(
           fullPath,
-          std::make_shared<FSEventsWatcher>(false, std::optional(fullPath)));
+          std::make_shared<FSEventsWatcher>(
+              false, root->config, std::optional(fullPath)));
       const auto& watcher = it->second;
       if (!watcher->start(root)) {
         throw std::runtime_error("couldn't start fsEvent");
@@ -255,7 +256,7 @@ Watcher::ConsumeNotifyRet KQueueAndFSEventsWatcher::consumeNotify(
 }
 
 bool KQueueAndFSEventsWatcher::waitNotify(int timeoutms) {
-  return pendingCondition_->wait(timeoutms);
+  return pendingCondition_->waitAndClear(timeoutms);
 }
 
 void KQueueAndFSEventsWatcher::signalThreads() {

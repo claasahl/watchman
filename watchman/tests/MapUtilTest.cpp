@@ -2,10 +2,10 @@
  * Licensed under the Apache License, Version 2.0. */
 
 #include "watchman/MapUtil.h"
-#include <folly/logging/xlog.h>
 #include <folly/portability/GTest.h>
 #include <string>
-#include "watchman/watchman.h"
+#include <unordered_map>
+#include <unordered_set>
 #include "watchman/watchman_string.h"
 
 using watchman::mapContainsAny;

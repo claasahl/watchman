@@ -1,3 +1,5 @@
+#![deny(warnings, rust_2018_idioms)]
+
 pub mod bytestring;
 pub mod de;
 mod errors;

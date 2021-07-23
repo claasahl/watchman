@@ -4,7 +4,7 @@
 #pragma once
 
 #include <stdexcept>
-#include "CommandRegistry.h"
+#include "watchman/CommandRegistry.h"
 
 // For commands that take the root dir as the second parameter,
 // realpath's that parameter on the client side and updates the
@@ -57,9 +57,6 @@ std::shared_ptr<watchman_root> resolveOrCreateRoot(
     const json_ref& args);
 
 json_ref make_response();
-void annotate_with_clock(
-    const std::shared_ptr<watchman_root>& root,
-    json_ref& resp);
 void add_root_warnings_to_response(
     json_ref& response,
     const std::shared_ptr<watchman_root>& root);

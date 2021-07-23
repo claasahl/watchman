@@ -1,10 +1,10 @@
 /* Copyright 2016-present Facebook, Inc.
  * Licensed under the Apache License, Version 2.0 */
 #pragma once
-#include "PubSub.h"
 #include "folly/Synchronized.h"
+#include "watchman/PubSub.h"
+#include "watchman/watchman_preprocessor.h"
 #include "watchman/watchman_string.h"
-#include "watchman_preprocessor.h"
 
 namespace watchman {
 

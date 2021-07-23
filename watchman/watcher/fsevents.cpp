@@ -8,9 +8,11 @@
 #include <iterator>
 #include <mutex>
 #include <vector>
+#include "watchman/FlagMap.h"
 #include "watchman/InMemoryView.h"
 #include "watchman/LogConfig.h"
 #include "watchman/Pipe.h"
+#include "watchman/watcher/WatcherRegistry.h"
 #include "watchman/watchman.h"
 
 #if HAVE_FSEVENTS
@@ -90,12 +92,6 @@ struct FSEventsLogEntry {
 };
 static_assert(64 == sizeof(FSEventsLogEntry));
 
-static fse_stream* fse_stream_make(
-    const std::shared_ptr<watchman_root>& root,
-    FSEventsWatcher* watcher,
-    FSEventStreamEventId since,
-    w_string& failure_reason);
-
 std::shared_ptr<FSEventsWatcher> watcherFromRoot(
     const std::shared_ptr<watchman_root>& root) {
   auto view = std::dynamic_pointer_cast<watchman::InMemoryView>(root->view());
@@ -117,7 +113,7 @@ static void log_drop_event(
   sample.log();
 }
 
-static void fse_callback(
+void FSEventsWatcher::fse_callback(
     ConstFSEventStreamRef,
     void* clientCallBackInfo,
     size_t numEvents,
@@ -164,7 +160,7 @@ static void fse_callback(
         log_drop_event(
             root, eventFlags[i] & kFSEventStreamEventFlagKernelDropped);
 
-        if (watcher->attempt_resync_on_drop) {
+        if (watcher->attemptResyncOnDrop_) {
         // fseventsd has a reliable journal so we can attempt to resync.
         do_resync:
           if (stream->event_id_wrapped) {
@@ -176,7 +172,7 @@ static void fse_callback(
             goto propagate;
           }
 
-          if (watcher->stream == stream) {
+          if (watcher->stream_ == stream) {
             // We are the active stream for this watch which means that it
             // is safe for us to proceed with changing watcher->stream.
             // Attempt to set up a new stream to resync from the last-good
@@ -213,7 +209,7 @@ static void fse_callback(
                 stream->last_good);
 
             // mark the replacement as the winner
-            watcher->stream = replacement;
+            watcher->stream_ = replacement;
 
             // And tear ourselves down
             delete stream;
@@ -225,7 +221,7 @@ static void fse_callback(
         break;
       }
     }
-  } else if (watcher->attempt_resync_on_drop) {
+  } else if (watcher->attemptResyncOnDrop_) {
     // This stream has already lost sync and our policy is to resync
     // for ourselves.  This is most likely a spurious callback triggered
     // after we'd taken action above.  We just ignore further events
@@ -274,7 +270,7 @@ propagate:
   if (!items.empty()) {
     auto wlock = watcher->items_.lock();
     wlock->items.push_back(std::move(items));
-    watcher->fse_cond.notify_one();
+    watcher->fseCond_.notify_one();
   }
 }
 
@@ -294,7 +290,7 @@ fse_stream::~fse_stream() {
   }
 }
 
-static fse_stream* fse_stream_make(
+fse_stream* FSEventsWatcher::fse_stream_make(
     const std::shared_ptr<watchman_root>& root,
     FSEventsWatcher* watcher,
     FSEventStreamEventId since,
@@ -340,7 +336,7 @@ static fse_stream* fse_stream_make(
       goto fail;
     }
     // Compare the UUID with that of the current stream
-    if (!watcher->stream->uuid) {
+    if (!watcher->stream_->uuid) {
       failure_reason = w_string(
           "fsevents journal was not available for prior stream",
           W_STRING_UNICODE);
@@ -348,7 +344,7 @@ static fse_stream* fse_stream_make(
     }
 
     a = CFUUIDGetUUIDBytes(fse_stream->uuid);
-    b = CFUUIDGetUUIDBytes(watcher->stream->uuid);
+    b = CFUUIDGetUUIDBytes(watcher->stream_->uuid);
 
     if (memcmp(&a, &b, sizeof(a)) != 0) {
       failure_reason =
@@ -393,7 +389,7 @@ static fse_stream* fse_stream_make(
       latency);
 
   flags = kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagWatchRoot;
-  if (watcher->has_file_watching) {
+  if (watcher->hasFileWatching_) {
     flags |= kFSEventStreamCreateFlagFileEvents;
   }
   fse_stream->stream = FSEventStreamCreate(
@@ -491,12 +487,12 @@ void FSEventsWatcher::FSEventsThread(
     // Block until fsevents_root_start is waiting for our initialization
     auto wlock = items_.lock();
 
-    attempt_resync_on_drop = root->config.getBool("fsevents_try_resync", true);
+    attemptResyncOnDrop_ = root->config.getBool("fsevents_try_resync", true);
 
     fdctx.info = root.get();
 
     fdref = CFFileDescriptorCreate(
-        nullptr, fse_pipe.read.fd(), true, fse_pipe_callback, &fdctx);
+        nullptr, fsePipe_.read.fd(), true, fse_pipe_callback, &fdctx);
     CFFileDescriptorEnableCallBacks(fdref, kCFFileDescriptorReadCallBack);
     {
       CFRunLoopSourceRef fdsrc;
@@ -511,13 +507,13 @@ void FSEventsWatcher::FSEventsThread(
       CFRelease(fdsrc);
     }
 
-    stream = fse_stream_make(
+    stream_ = fse_stream_make(
         root, this, kFSEventStreamEventIdSinceNow, root->failure_reason);
-    if (!stream) {
+    if (!stream_) {
       goto done;
     }
 
-    if (!FSEventStreamStart(stream->stream)) {
+    if (!FSEventStreamStart(stream_->stream)) {
       root->failure_reason = w_string::build(
           "FSEventStreamStart failed, look at your log file ",
           log_name,
@@ -528,15 +524,15 @@ void FSEventsWatcher::FSEventsThread(
     }
 
     // Signal to fsevents_root_start that we're done initializing
-    fse_cond.notify_one();
+    fseCond_.notify_one();
   }
 
   // Process the events stream until we get signalled to quit
   CFRunLoopRun();
 
 done:
-  if (stream) {
-    delete stream;
+  if (stream_) {
+    delete stream_;
   }
   if (fdref) {
     CFRelease(fdref);
@@ -547,14 +543,16 @@ done:
 
 FSEventsWatcher::FSEventsWatcher(
     bool hasFileWatching,
+    Configuration& config,
     std::optional<w_string> dir)
     : Watcher(
           hasFileWatching ? "fsevents" : "dirfsevents",
           hasFileWatching
               ? (WATCHER_HAS_PER_FILE_NOTIFICATIONS | WATCHER_COALESCED_RENAME)
-              : WATCHER_ONLY_DIRECTORY_NOTIFICATIONS),
-      has_file_watching(hasFileWatching),
-      subdir(std::move(dir)) {
+              : 0),
+      hasFileWatching_{hasFileWatching},
+      enableStreamFlush_{config.getBool("fsevents_enable_stream_flush", true)},
+      subdir{std::move(dir)} {
   // TODO: Add ring buffer logging for events in the shared kqueue+fsevents
   // logger.
 }
@@ -562,12 +560,15 @@ FSEventsWatcher::FSEventsWatcher(
 FSEventsWatcher::FSEventsWatcher(
     watchman_root* root,
     std::optional<w_string> dir)
-    : FSEventsWatcher(root->config.getBool("fsevents_watch_files", true), dir) {
+    : FSEventsWatcher(
+          root->config.getBool("fsevents_watch_files", true),
+          root->config,
+          dir) {
   json_int_t fsevents_ring_log_size =
       root->config.getInt("fsevents_ring_log_size", 0);
   if (fsevents_ring_log_size) {
-    ringBuffer_ = std::make_unique<folly::LockFreeRingBuffer<FSEventsLogEntry>>(
-        fsevents_ring_log_size);
+    ringBuffer_ =
+        std::make_unique<RingBuffer<FSEventsLogEntry>>(fsevents_ring_log_size);
   }
 }
 
@@ -594,7 +595,7 @@ bool FSEventsWatcher::start(const std::shared_ptr<watchman_root>& root) {
       // Ensure that we signal the condition variable before we
       // finish this thread.  That ensures that don't get stuck
       // waiting in FSEventsWatcher::start if something unexpected happens.
-      self->fse_cond.notify_one();
+      self->fseCond_.notify_one();
     });
     // We have to detach because the readChangesThread may wind up
     // being the last thread to reference the watcher state and
@@ -602,7 +603,7 @@ bool FSEventsWatcher::start(const std::shared_ptr<watchman_root>& root) {
     thread.detach();
 
     // Allow thread init to proceed; wait for its signal
-    fse_cond.wait(wlock.as_lock());
+    fseCond_.wait(wlock.as_lock());
 
     if (root->failure_reason) {
       logf(ERR, "failed to start fsevents thread: {}\n", root->failure_reason);
@@ -618,6 +619,10 @@ bool FSEventsWatcher::start(const std::shared_ptr<watchman_root>& root) {
 }
 
 folly::SemiFuture<folly::Unit> FSEventsWatcher::flushPendingEvents() {
+  if (!enableStreamFlush_) {
+    return folly::SemiFuture<folly::Unit>::makeEmpty();
+  }
+
   auto [p, f] = folly::makePromiseContract<folly::Unit>();
 
   /*
@@ -652,19 +657,25 @@ folly::SemiFuture<folly::Unit> FSEventsWatcher::flushPendingEvents() {
    */
 
   // Ensure all events queued by FSEvents are pushed into wlock->items.
-  FSEventStreamFlushSync(stream->stream);
+  FSEventStreamFlushSync(stream_->stream);
 
   // Now return a Future that is fulfilled when all of the items have been
   // processed by InMemoryView.
   auto wlock = items_.lock();
   wlock->syncs.push_back(std::move(p));
-  fse_cond.notify_one();
+  fseCond_.notify_one();
   return std::move(f);
 }
 
 bool FSEventsWatcher::waitNotify(int timeoutms) {
   auto wlock = items_.lock();
-  fse_cond.wait_for(wlock.as_lock(), std::chrono::milliseconds(timeoutms));
+  // First check to see if someone added elements to these lists while the lock
+  // wasn't held.
+  if (!wlock->items.empty() || !wlock->syncs.empty()) {
+    // Yes, let's not wait on the condition.
+    return true;
+  }
+  fseCond_.wait_for(wlock.as_lock(), std::chrono::milliseconds(timeoutms));
   return !wlock->items.empty() || !wlock->syncs.empty();
 }
 
@@ -746,7 +757,7 @@ Watcher::ConsumeNotifyRet FSEventsWatcher::consumeNotify(
         break;
       }
 
-      if (!has_file_watching && item.path.size() < root->root_path.size()) {
+      if (!hasFileWatching_ && item.path.size() < root->root_path.size()) {
         // The test_watch_del_all appear to trigger this?
         log(ERR,
             "Got an event on a directory parent to the root directory: {}?\n",
@@ -760,6 +771,8 @@ Watcher::ConsumeNotifyRet FSEventsWatcher::consumeNotify(
           (kFSEventStreamEventFlagMustScanSubDirs |
            kFSEventStreamEventFlagItemRenamed)) {
         flags |= W_PENDING_RECURSIVE;
+      } else if (!hasFileWatching_) {
+        flags |= W_PENDING_NONRECURSIVE_SCAN;
       }
 
       if (item.flags &
@@ -780,7 +793,7 @@ Watcher::ConsumeNotifyRet FSEventsWatcher::consumeNotify(
 }
 
 void FSEventsWatcher::signalThreads() {
-  write(fse_pipe.write.fd(), "X", 1);
+  write(fsePipe_.write.fd(), "X", 1);
 }
 
 std::unique_ptr<watchman_dir_handle> FSEventsWatcher::startWatchDir(
@@ -793,22 +806,8 @@ std::unique_ptr<watchman_dir_handle> FSEventsWatcher::startWatchDir(
 json_ref FSEventsWatcher::getDebugInfo() {
   json_ref events = json_null();
   if (ringBuffer_) {
-    std::vector<FSEventsLogEntry> entries;
-
-    auto head = ringBuffer_->currentHead();
-    if (head.moveBackward()) {
-      FSEventsLogEntry entry;
-      while (ringBuffer_->tryRead(entry, head)) {
-        entries.push_back(std::move(entry));
-        if (!head.moveBackward()) {
-          break;
-        }
-      }
-    }
-    std::reverse(entries.begin(), entries.end());
-
     events = json_array();
-    for (auto& entry : entries) {
+    for (auto& entry : ringBuffer_->readAll()) {
       json_array_append(events, entry.asJsonValue());
     }
   }
@@ -818,11 +817,21 @@ json_ref FSEventsWatcher::getDebugInfo() {
   });
 }
 
+void FSEventsWatcher::clearDebugInfo() {
+  // This is just debug info so small races are not problematic. To avoid races,
+  // totalEventsSeen_ could be stored directly if ringBuffer_ is null, or as the
+  // difference between currentHead() - lastClear_ if not null.
+  totalEventsSeen_.store(0, std::memory_order_release);
+  if (ringBuffer_) {
+    ringBuffer_->clear();
+  }
+}
+
 static RegisterWatcher<FSEventsWatcher> reg("fsevents");
 
 // A helper command to facilitate testing that we can successfully
 // resync the stream.
-static void cmd_debug_fsevents_inject_drop(
+void FSEventsWatcher::cmd_debug_fsevents_inject_drop(
     watchman_client* client,
     const json_ref& args) {
   FSEventStreamEventId last_good;
@@ -842,15 +851,15 @@ static void cmd_debug_fsevents_inject_drop(
     return;
   }
 
-  if (!watcher->attempt_resync_on_drop) {
+  if (!watcher->attemptResyncOnDrop_) {
     send_error_response(client, "fsevents_try_resync is not enabled");
     return;
   }
 
   {
     auto wlock = watcher->items_.lock();
-    last_good = watcher->stream->last_good;
-    watcher->stream->inject_drop = true;
+    last_good = watcher->stream_->last_good;
+    watcher->stream_->inject_drop = true;
   }
 
   auto resp = make_response();
@@ -859,7 +868,7 @@ static void cmd_debug_fsevents_inject_drop(
 }
 W_CMD_REG(
     "debug-fsevents-inject-drop",
-    cmd_debug_fsevents_inject_drop,
+    FSEventsWatcher::cmd_debug_fsevents_inject_drop,
     CMD_DAEMON,
     w_cmd_realpath_root)
 

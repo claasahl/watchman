@@ -1,7 +1,11 @@
 /* Copyright 2014-present Facebook, Inc.
  * Licensed under the Apache License, Version 2.0 */
 
+#include "watchman/WatchmanConfig.h"
 #include "watchman/watchman.h"
+#include "watchman/watchman_stream.h"
+
+using namespace watchman;
 
 std::unique_ptr<watchman_stream> w_stm_connect(int timeoutms) {
   // Default to using unix domain sockets unless disabled by config

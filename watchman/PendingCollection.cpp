@@ -1,8 +1,12 @@
 /* Copyright 2012-present Facebook, Inc.
  * Licensed under the Apache License, Version 2.0 */
 
+#include "watchman/PendingCollection.h"
 #include <folly/Synchronized.h>
-#include "watchman/watchman.h"
+#include "watchman/Cookie.h"
+#include "watchman/FlagMap.h"
+#include "watchman/Logging.h"
+#include "watchman/watchman_dir.h"
 
 using namespace watchman;
 
@@ -12,6 +16,7 @@ namespace {
 constexpr flag_map kFlags[] = {
     {W_PENDING_CRAWL_ONLY, "CRAWL_ONLY"},
     {W_PENDING_RECURSIVE, "RECURSIVE"},
+    {W_PENDING_NONRECURSIVE_SCAN, "NONRECURSIVE_SCAN"},
     {W_PENDING_VIA_NOTIFY, "VIA_NOTIFY"},
     {W_PENDING_IS_DESYNCED, "IS_DESYNCED"},
     {0, NULL},
@@ -179,7 +184,7 @@ void PendingChanges::maybePruneObsoletedChildren(w_string path, int flags) {
       if ((p->flags & W_PENDING_CRAWL_ONLY) == 0 && key.size() > path.size() &&
           is_path_prefix(
               (const char*)key.data(), key.size(), path.data(), path.size()) &&
-          !watchman::CookieSync::isPossiblyACookie(p->path)) {
+          !watchman::isPossiblyACookie(p->path)) {
         logf(
             DBG,
             "delete_kids: removing ({}) {} from pending because it is "
@@ -227,7 +232,8 @@ void PendingChanges::consolidateItem(watchman_pending_fs* p, int flags) {
   // we've recently just performed the stat and we want to avoid
   // infinitely trying to stat-and-crawl
   p->flags |= flags &
-      (W_PENDING_CRAWL_ONLY | W_PENDING_RECURSIVE | W_PENDING_IS_DESYNCED);
+      (W_PENDING_CRAWL_ONLY | W_PENDING_RECURSIVE |
+       W_PENDING_NONRECURSIVE_SCAN | W_PENDING_IS_DESYNCED);
 
   maybePruneObsoletedChildren(p->path, p->flags);
 }
@@ -243,13 +249,14 @@ bool PendingChanges::isObsoletedByContainingDir(const w_string& path) {
   }
   auto p = leaf->value;
 
-  if ((p->flags & W_PENDING_RECURSIVE) &&
+  if ((p->flags & (W_PENDING_RECURSIVE | W_PENDING_CRAWL_ONLY)) ==
+          W_PENDING_RECURSIVE &&
       is_path_prefix(
           path.data(),
           path.size(),
           (const char*)leaf->key.data(),
           leaf->key.size())) {
-    if (watchman::CookieSync::isPossiblyACookie(path)) {
+    if (watchman::isPossiblyACookie(path)) {
       return false;
     }
 
